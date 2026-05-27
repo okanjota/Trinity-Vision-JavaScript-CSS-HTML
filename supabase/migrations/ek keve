@@ -1,0 +1,130 @@
+CREATE TYPE public.student_status AS ENUM ('regular', 'pendente', 'bloqueado');
+
+CREATE TABLE public.students (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  name TEXT NOT NULL,
+  registration_number TEXT NOT NULL UNIQUE,
+  course TEXT NOT NULL,
+  status public.student_status NOT NULL DEFAULT 'regular',
+  photo_url TEXT,
+  face_encoding TEXT, -- Armazenar encodings faciais como JSON string
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE TABLE public.access_logs (
+  id UUID NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY,
+  student_id UUID REFERENCES public.students(id) ON DELETE SET NULL,
+  student_name TEXT,
+  registration_number TEXT,
+  access_granted BOOLEAN NOT NULL,
+  access_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  reason TEXT,
+  photo_url TEXT
+);
+
+CREATE TABLE public.profiles (
+  id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
+  email TEXT,
+  full_name TEXT,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.students ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.access_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Admins can view all students" 
+  ON public.students FOR SELECT 
+  USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Admins can insert students" 
+  ON public.students FOR INSERT 
+  WITH CHECK (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Admins can update students" 
+  ON public.students FOR UPDATE 
+  USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Admins can delete students" 
+  ON public.students FOR DELETE 
+  USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Admins can view all access logs" 
+  ON public.access_logs FOR SELECT 
+  USING (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Admins can insert access logs" 
+  ON public.access_logs FOR INSERT 
+  WITH CHECK (auth.uid() IS NOT NULL);
+
+CREATE POLICY "Users can view their own profile" 
+  ON public.profiles FOR SELECT 
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can update their own profile" 
+  ON public.profiles FOR UPDATE 
+  USING (auth.uid() = id);
+
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name)
+  VALUES (
+    new.id,
+    new.email,
+    COALESCE(new.raw_user_meta_data->>'full_name', '')
+  );
+  RETURN new;
+END;
+$$;
+
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_students_updated_at
+  BEFORE UPDATE ON public.students
+  FOR EACH ROW
+  EXECUTE FUNCTION public.update_updated_at_column();
+
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('student-photos', 'student-photos', true)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE POLICY "Admins can upload student photos"
+  ON storage.objects FOR INSERT
+  WITH CHECK (
+    bucket_id = 'student-photos' AND
+    auth.uid() IS NOT NULL
+  );
+
+CREATE POLICY "Anyone can view student photos"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'student-photos');
+
+CREATE POLICY "Admins can update student photos"
+  ON storage.objects FOR UPDATE
+  USING (
+    bucket_id = 'student-photos' AND
+    auth.uid() IS NOT NULL
+  );
+
+CREATE POLICY "Admins can delete student photos"
+  ON storage.objects FOR DELETE
+  USING (
+    bucket_id = 'student-photos' AND
+    auth.uid() IS NOT NULL
+  );
